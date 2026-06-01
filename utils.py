@@ -2,6 +2,183 @@ import numpy as np
 import matplotlib.pyplot as plt
 import rioxarray  # activates the .rio accessor
 
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def plot_sentinel2_vs_tessera_pca(
+    image,
+    embeddings,
+    vector_data=None,
+    image_crs="EPSG:32632",
+    boundary_color="white",
+    figsize=(14, 7),
+    max_size=1024,
+    pca_sample_size=50000,
+    random_seed=42,
+    title="Sentinel-2 RGB vs. TESSERA PCA",
+):
+    """
+    Plot a normal Sentinel-2 RGB image next to a PCA visualization
+    of TESSERA embeddings.
+
+    Left panel:
+        Sentinel-2 RGB image using B04, B03, B02.
+
+    Right panel:
+        TESSERA embeddings compressed to 3 PCA components and shown as RGB.
+    """
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from sklearn.decomposition import PCA
+
+    if image.rio.crs is None:
+        image = image.rio.write_crs(image_crs)
+
+    if embeddings.rio.crs is None:
+        embeddings = embeddings.rio.write_crs(image_crs)
+
+    # Match TESSERA to Sentinel-2 grid if needed.
+    # This keeps the comparison spatially aligned.
+    embeddings = embeddings.rio.reproject_match(image)
+
+    # Downsample only for plotting speed.
+    y_size = image.sizes["y"]
+    x_size = image.sizes["x"]
+
+    stride = max(1, int(np.ceil(max(y_size, x_size) / max_size)))
+
+    image_plot = image.isel(
+        y=slice(None, None, stride),
+        x=slice(None, None, stride),
+    )
+
+    emb_plot = embeddings.isel(
+        y=slice(None, None, stride),
+        x=slice(None, None, stride),
+    )
+
+    extent = [
+        float(image_plot.x.min()),
+        float(image_plot.x.max()),
+        float(image_plot.y.min()),
+        float(image_plot.y.max()),
+    ]
+
+    # -----------------------------
+    # Prepare Sentinel-2 RGB image
+    # -----------------------------
+    red = image_plot.sel(band="B04")
+    green = image_plot.sel(band="B03")
+    blue = image_plot.sel(band="B02")
+
+    rgb = np.stack([red.values, green.values, blue.values]).astype("float32")
+
+    if np.nanmax(rgb) > 1.5:
+        rgb = rgb / 10000.0
+
+    p2 = np.nanpercentile(rgb, 2, axis=(1, 2), keepdims=True)
+    p98 = np.nanpercentile(rgb, 98, axis=(1, 2), keepdims=True)
+
+    rgb = (rgb - p2) / (p98 - p2 + 1e-6)
+    rgb = np.clip(rgb, 0, 1)
+    rgb_plot = np.transpose(rgb, (1, 2, 0))
+
+    # -----------------------------
+    # Prepare TESSERA PCA RGB image
+    # -----------------------------
+    arr = emb_plot.values.astype("float32")
+    n_bands, n_y, n_x = arr.shape
+
+    pixel_table = arr.reshape(n_bands, n_y * n_x).T
+
+    valid_pixels = np.isfinite(pixel_table).all(axis=1)
+    valid_data = pixel_table[valid_pixels]
+
+    if valid_data.shape[0] == 0:
+        raise ValueError("No valid TESSERA embedding pixels found for PCA plotting.")
+
+    rng = np.random.default_rng(random_seed)
+
+    n_sample = min(pca_sample_size, valid_data.shape[0])
+    sample_idx = rng.choice(
+        valid_data.shape[0],
+        size=n_sample,
+        replace=False,
+    )
+
+    pca = PCA(n_components=3, random_state=random_seed)
+    pca.fit(valid_data[sample_idx])
+
+    pca_values = pca.transform(valid_data)
+
+    pca_rgb_flat = np.full(
+        (n_y * n_x, 3),
+        fill_value=np.nan,
+        dtype="float32",
+    )
+
+    pca_rgb_flat[valid_pixels] = pca_values
+    pca_rgb = pca_rgb_flat.reshape(n_y, n_x, 3)
+
+    # Robust stretch each PCA component to 0-1.
+    for i in range(3):
+        component = pca_rgb[:, :, i]
+        valid_component = component[np.isfinite(component)]
+
+        p2 = np.nanpercentile(valid_component, 2)
+        p98 = np.nanpercentile(valid_component, 98)
+
+        pca_rgb[:, :, i] = (component - p2) / (p98 - p2 + 1e-6)
+
+    pca_rgb = np.clip(pca_rgb, 0, 1)
+
+    explained = pca.explained_variance_ratio_ * 100
+
+    # -----------------------------
+    # Plot side by side
+    # -----------------------------
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+    axes[0].imshow(
+        rgb_plot,
+        extent=extent,
+        origin="upper",
+    )
+    axes[0].set_title("Sentinel-2 RGB")
+
+    axes[1].imshow(
+        pca_rgb,
+        extent=extent,
+        origin="upper",
+    )
+    axes[1].set_title(
+        "TESSERA PCA RGB\n"
+        f"PC1 {explained[0]:.1f}%, "
+        f"PC2 {explained[1]:.1f}%, "
+        f"PC3 {explained[2]:.1f}%"
+    )
+
+    if vector_data is not None:
+        vector_plot = vector_data.to_crs(image_plot.rio.crs)
+
+        for ax in axes:
+            vector_plot.boundary.plot(
+                ax=ax,
+                edgecolor=boundary_color,
+                linewidth=0.8,
+            )
+
+    for ax in axes:
+        ax.set_axis_off()
+
+    fig.suptitle(title)
+
+    plt.tight_layout()
+    plt.show()
+
+    return fig, axes
 
 def plot_sentinel2_cube_rgb(
     cube,
@@ -1037,3 +1214,4 @@ def plot_prediction_map(
     plt.show()
 
     return fig, axes
+
